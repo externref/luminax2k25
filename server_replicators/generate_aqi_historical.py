@@ -3,8 +3,6 @@ import json
 from datetime import datetime, timedelta
 import time
 
-url = "http://localhost:5173/api/report"
-WAQI_TOKEN = "2ec482f4c0f10861638fb438cdb2af6adaa342f3"
 
 localities = [
     {"name": "Koramangala", "coords": {"latitude": 12.9352, "longitude": 77.6245}},

@@ -20,6 +20,7 @@
 	let markerLayer: any;
 	let selectedLocality: string | null = $state(null);
 	let historicalData: any[] = $state([]);
+	let predictions: any[] = $state([]);
 	let loadingHistory = $state(false);
 	let liveUpdates: AQIRecord[] = $state([]);
 	let eventSource: EventSource | null = null;
@@ -52,13 +53,26 @@
 	async function fetchHistoricalData(locality: string) {
 		loadingHistory = true;
 		try {
-			const response = await fetch(`/api/historical?locality=${encodeURIComponent(locality)}&limit=20`);
-			const result = await response.json();
-			if (result.data) {
-				historicalData = result.data;
+			const [histResponse, predResponse] = await Promise.all([
+				fetch(`/api/historical?locality=${encodeURIComponent(locality)}&limit=20`),
+				fetch(`/api/predict-aqi?locality=${encodeURIComponent(locality)}`)
+			]);
+			
+			const histResult = await histResponse.json();
+			const predResult = await predResponse.json();
+			
+			if (histResult.data) {
+				historicalData = histResult.data;
+			}
+			
+			if (predResult.predictions) {
+				predictions = predResult.predictions;
+			} else {
+				predictions = [];
 			}
 		} catch (error) {
 			console.error('Error fetching historical data:', error);
+			predictions = [];
 		} finally {
 			loadingHistory = false;
 		}
@@ -291,8 +305,7 @@
 	});
 </script>
 
-<div class="min-h-screen bg-slate-950">
-	<div class="flex h-screen">
+<div class="flex h-screen">
 		<div class="flex-1 overflow-y-auto px-8 py-8">
 			<div class="mb-8 flex items-center justify-between">
 				<div>
@@ -371,21 +384,42 @@
 											</defs>
 											
 											{#if historicalData.length > 0}
-												{@const maxValue = Math.max(...historicalData.map(d => d.value), 300)}
-												{@const minValue = Math.min(...historicalData.map(d => d.value), 0)}
+												{@const allValues = [...historicalData.map(d => d.value), ...(predictions.length > 0 ? predictions.map(p => p.predicted_value) : [])]}
+												{@const maxValue = Math.max(...allValues, 200)}
+												{@const minValue = Math.min(...allValues, 0)}
 												{@const range = maxValue - minValue || 1}
-												{@const points = historicalData.slice().reverse().map((d, i) => {
-													const x = (i / (historicalData.length - 1 || 1)) * 760 + 20;
+												{@const histPoints = historicalData.slice().reverse().map((d, i) => {
+													const x = (i / (historicalData.length - 1 || 1)) * 520 + 20;
 													const y = 280 - ((d.value - minValue) / range) * 240;
 													return { x, y, value: d.value, date: d.created_at };
 												})}
-												{@const pathD = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ')}
-												{@const areaD = `${pathD} L ${points[points.length - 1]?.x} 280 L 20 280 Z`}
+												{@const lastHistPoint = histPoints[histPoints.length - 1]}
+												{@const predPoints = predictions.length > 0 ? predictions.map((p, i) => {
+													const x = lastHistPoint.x + ((i + 1) / predictions.length) * 240;
+													const y = 280 - ((p.predicted_value - minValue) / range) * 240;
+													const yUpper = 280 - ((p.upper_bound - minValue) / range) * 240;
+													const yLower = 280 - ((p.lower_bound - minValue) / range) * 240;
+													return { x, y, yUpper, yLower, value: p.predicted_value, date: p.timestamp, pred: p };
+												}) : []}
+												{@const histPathD = histPoints.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ')}
+												{@const predPathD = predPoints.length > 0 ? `M ${lastHistPoint.x} ${lastHistPoint.y} ` + predPoints.map(p => `L ${p.x} ${p.y}`).join(' ') : ''}
+												{@const areaD = `${histPathD} L ${histPoints[histPoints.length - 1]?.x} 280 L 20 280 Z`}
+												{@const uncertaintyArea = predPoints.length > 0 ? 
+													`M ${lastHistPoint.x} ${lastHistPoint.y} ` + 
+													predPoints.map(p => `L ${p.x} ${p.yUpper}`).join(' ') + 
+													` L ${predPoints[predPoints.length - 1].x} ${predPoints[predPoints.length - 1].yLower} ` +
+													predPoints.slice().reverse().map(p => `L ${p.x} ${p.yLower}`).join(' ') +
+													` Z` : ''}
 												
 												<path d={areaD} fill="url(#gradient)" opacity="0.3"/>
-												<path d={pathD} fill="none" stroke="#3b82f6" stroke-width="3"/>
+												<path d={histPathD} fill="none" stroke="#3b82f6" stroke-width="3"/>
 												
-												{#each points as point}
+												{#if predPathD}
+													<path d={uncertaintyArea} fill="#fbbf24" opacity="0.15"/>
+													<path d={predPathD} fill="none" stroke="#fbbf24" stroke-width="3" stroke-dasharray="5,5"/>
+												{/if}
+												
+												{#each histPoints as point}
 													<circle 
 														cx={point.x} 
 														cy={point.y} 
@@ -399,17 +433,85 @@
 													</circle>
 												{/each}
 												
+												{#each predPoints as point}
+													<circle 
+														cx={point.x} 
+														cy={point.y} 
+														r="5" 
+														fill={getAQIColor(point.value)}
+														stroke="#fbbf24"
+														stroke-width="2"
+														opacity="0.8"
+														class="cursor-pointer transition-all hover:r-7"
+													>
+														<title>Predicted: {point.value} AQI - {new Date(point.date).toLocaleString()}</title>
+													</circle>
+												{/each}
+												
 												<line x1="20" y1="280" x2="780" y2="280" stroke="#475569" stroke-width="1"/>
 												<line x1="20" y1="40" x2="20" y2="280" stroke="#475569" stroke-width="1"/>
 												
+												{#if predPoints.length > 0}
+													<line x1={lastHistPoint.x} y1="40" x2={lastHistPoint.x} y2="280" stroke="#94a3b8" stroke-width="1" stroke-dasharray="3,3" opacity="0.5"/>
+													<text x={lastHistPoint.x - 20} y="30" fill="#94a3b8" font-size="10">Now</text>
+												{/if}
+												
 												<text x="10" y="45" fill="#94a3b8" font-size="12">{maxValue}</text>
 												<text x="10" y="285" fill="#94a3b8" font-size="12">{minValue}</text>
+												
+												<g transform="translate(650, 50)">
+													<rect x="0" y="0" width="15" height="3" fill="#3b82f6"/>
+													<text x="20" y="8" fill="#94a3b8" font-size="11">Historical</text>
+													<rect x="0" y="15" width="15" height="3" fill="#fbbf24" opacity="0.8"/>
+													<text x="20" y="23" fill="#94a3b8" font-size="11">Predicted</text>
+												</g>
+
 											{/if}
 										</svg>
 									</div>
 
-									<div class="grid gap-3 md:grid-cols-2">
-										{#each historicalData as record}
+									{#if predictions.length > 0}
+										<div class="mt-6">
+										<h3 class="mb-4 text-lg font-semibold text-white">
+											<span class="mr-2">🔮</span>
+											AQI Predictions (1-2 Days Ahead)
+										</h3>
+										<div class="grid gap-3 md:grid-cols-2">
+												{#each predictions as pred}
+													<div class="rounded-lg border border-slate-700 bg-slate-900/50 p-4">
+														<div class="mb-2 flex items-center justify-between">
+															<span class="text-xs font-semibold text-slate-400">
+																+{pred.hours_ahead}h
+															</span>
+															<span class="text-xs text-slate-500">
+																{Math.round(pred.confidence * 100)}% confidence
+															</span>
+														</div>
+														<div class="mb-2 flex items-center gap-3">
+															<div
+																class="h-4 w-4 rounded-full"
+																style="background-color: {getAQIColor(pred.predicted_value)}"
+															></div>
+															<span class="text-2xl font-bold text-white">
+																{pred.predicted_value}
+															</span>
+														</div>
+														<p class="mb-2 text-xs text-slate-400">
+															{new Date(pred.timestamp).toLocaleString()}
+														</p>
+														<div class="flex items-center gap-2 text-xs text-slate-500">
+															<span>Range: {pred.lower_bound}-{pred.upper_bound}</span>
+														</div>
+														<p class="mt-1 text-xs font-medium" style="color: {getAQIColor(pred.predicted_value)}">
+															{getAQICategory(pred.predicted_value)}
+														</p>
+													</div>
+												{/each}
+											</div>
+										</div>
+									{/if}
+
+									<div class="grid gap-3 md:grid-cols-2">{#each historicalData as record}
 											<div class="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950 p-4">
 												<div>
 													<p class="text-sm text-slate-400">
@@ -488,7 +590,6 @@
 				</div>
 			{/if}
 		</div>
-	</div>
 </div>
 
 <style>

@@ -20,6 +20,7 @@
 	let markerLayer: any;
 	let selectedLocality: string | null = $state(null);
 	let historicalData: any[] = $state([]);
+	let predictions: any[] = $state([]);
 	let loadingHistory = $state(false);
 	let liveUpdates: WaterRecord[] = $state([]);
 	let eventSource: EventSource | null = null;
@@ -54,12 +55,27 @@
 		loadingHistory = true;
 
 		try {
-			const response = await fetch(`/api/water-history?locality=${encodeURIComponent(locality)}`);
-			if (!response.ok) throw new Error('Failed to fetch historical data');
-			historicalData = await response.json();
+			const [histResponse, predResponse] = await Promise.all([
+				fetch(`/api/water-history?locality=${encodeURIComponent(locality)}`),
+				fetch(`/api/predict-water?locality=${encodeURIComponent(locality)}`)
+			]);
+			
+			if (histResponse.ok) {
+				historicalData = await histResponse.json();
+			} else {
+				historicalData = [];
+			}
+			
+			if (predResponse.ok) {
+				const predResult = await predResponse.json();
+				predictions = predResult.predictions || [];
+			} else {
+				predictions = [];
+			}
 		} catch (error) {
 			console.error('Error fetching historical data:', error);
 			historicalData = [];
+			predictions = [];
 		} finally {
 			loadingHistory = false;
 		}
@@ -249,8 +265,7 @@
 	});
 </script>
 
-<div class="min-h-screen bg-slate-950">
-	<div class="flex h-screen">
+<div class="flex h-screen">
 		<div class="flex-1 overflow-y-auto px-8 py-8">
 			<div class="mb-8 flex items-center justify-between">
 				<div>
@@ -325,44 +340,155 @@
 								{:else}
 									<div class="mb-6">
 										<h3 class="mb-4 text-lg font-semibold text-white">WQI Trend</h3>
-										<svg viewBox="0 0 800 300" class="w-full" style="background: #0f172a; border-radius: 8px;">
+										<svg viewBox="0 0 800 320" class="w-full" style="background: #0f172a; border-radius: 8px; padding: 20px;">
 											{#if historicalData.length > 0}
-												{@const maxValue = Math.max(...historicalData.map(r => r.value))}
-												{@const minValue = Math.min(...historicalData.map(r => r.value))}
+												{@const values = historicalData.map((r) => r.value)}
+												{@const predValues = predictions.map((p) => p.predicted_value)}
+												{@const allValues = [...values, ...predValues]}
+												{@const maxValue = Math.max(...allValues, 100)}
+												{@const minValue = Math.min(...allValues, 0)}
 												{@const range = maxValue - minValue || 1}
-												{@const points = historicalData
-													.slice()
-													.reverse()
-													.map((record, i) => {
-														const x = 50 + (i * 700) / (historicalData.length - 1 || 1);
-														const y = 250 - ((record.value - minValue) / range) * 200;
-														return `${x},${y}`;
-													})
-													.join(' ')}
-
+												
+												{@const histPoints = historicalData.slice().reverse().map((record, i) => ({
+													x: 20 + (i * 520) / (historicalData.length - 1 || 1),
+													y: 280 - ((record.value - minValue) / range) * 240,
+													value: record.value,
+													date: record.created_at
+												}))}
+												
+												{@const lastHistPoint = histPoints[histPoints.length - 1] || { x: 520, y: 140, value: 70 }}
+												
+												{@const predPoints = predictions.map((pred, i) => ({
+													x: lastHistPoint.x + ((i + 1) * 240) / (predictions.length + 1),
+													y: 280 - ((pred.predicted_value - minValue) / range) * 240,
+													value: pred.predicted_value,
+													lower: pred.lower_bound,
+													upper: pred.upper_bound,
+													date: pred.timestamp
+												}))}
+												
+												{#if predPoints.length > 0}
+													{@const uncertaintyPath = [
+														...predPoints.map(p => `${p.x},${280 - ((p.upper - minValue) / range) * 240}`),
+														...predPoints.slice().reverse().map(p => `${p.x},${280 - ((p.lower - minValue) / range) * 240}`)
+													].join(' ')}
+													<polygon points={uncertaintyPath} fill="#fef3c7" opacity="0.2"/>
+												{/if}
+												
 												<polyline
-													points={points}
+													points={histPoints.map(p => `${p.x},${p.y}`).join(' ')}
 													fill="none"
 													stroke="#3b82f6"
 													stroke-width="3"
 													stroke-linecap="round"
 													stroke-linejoin="round"
 												/>
-
-												{#each historicalData.slice().reverse() as record, i}
-													{@const x = 50 + (i * 700) / (historicalData.length - 1 || 1)}
-													{@const y = 250 - ((record.value - minValue) / range) * 200}
-													<circle cx={x} cy={y} r="5" fill={getWaterQualityColor(record.value)} stroke="#fff" stroke-width="2" />
+												
+												{#if predPoints.length > 0}
+													{@const allPredPoints = [lastHistPoint, ...predPoints]}
+													<polyline
+														points={allPredPoints.map(p => `${p.x},${p.y}`).join(' ')}
+														fill="none"
+														stroke="#fbbf24"
+														stroke-width="3"
+														stroke-dasharray="8,4"
+														stroke-linecap="round"
+														stroke-linejoin="round"
+														opacity="0.8"
+													/>
+												{/if}
+												
+												{#each histPoints as point}
+													<circle 
+														cx={point.x} 
+														cy={point.y} 
+														r="5" 
+														fill={getWaterQualityColor(point.value)}
+														stroke="#fff"
+														stroke-width="2"
+														class="cursor-pointer transition-all hover:r-7"
+													>
+														<title>WQI: {point.value} - {new Date(point.date).toLocaleString()}</title>
+													</circle>
 												{/each}
-
-												<line x1="50" y1="250" x2="750" y2="250" stroke="#475569" stroke-width="2" />
-												<line x1="50" y1="50" x2="50" y2="250" stroke="#475569" stroke-width="2" />
-
+												
+												{#each predPoints as point}
+													<circle 
+														cx={point.x} 
+														cy={point.y} 
+														r="5" 
+														fill={getWaterQualityColor(point.value)}
+														stroke="#fbbf24"
+														stroke-width="2"
+														opacity="0.8"
+														class="cursor-pointer transition-all hover:r-7"
+													>
+														<title>Predicted: {point.value} WQI - {new Date(point.date).toLocaleString()}</title>
+													</circle>
+												{/each}
+												
+												<line x1="20" y1="280" x2="780" y2="280" stroke="#475569" stroke-width="1"/>
+												<line x1="20" y1="40" x2="20" y2="280" stroke="#475569" stroke-width="1"/>
+												
+												{#if predPoints.length > 0}
+													<line x1={lastHistPoint.x} y1="40" x2={lastHistPoint.x} y2="280" stroke="#94a3b8" stroke-width="1" stroke-dasharray="3,3" opacity="0.5"/>
+													<text x={lastHistPoint.x - 20} y="30" fill="#94a3b8" font-size="10">Now</text>
+												{/if}
+												
 												<text x="10" y="45" fill="#94a3b8" font-size="12">{maxValue}</text>
 												<text x="10" y="285" fill="#94a3b8" font-size="12">{minValue}</text>
+												
+												<g transform="translate(650, 50)">
+													<rect x="0" y="0" width="15" height="3" fill="#3b82f6"/>
+													<text x="20" y="8" fill="#94a3b8" font-size="11">Historical</text>
+													<rect x="0" y="15" width="15" height="3" fill="#fbbf24" opacity="0.8"/>
+													<text x="20" y="23" fill="#94a3b8" font-size="11">Predicted</text>
+												</g>
+
 											{/if}
 										</svg>
 									</div>
+
+									{#if predictions.length > 0}
+										<div class="mt-6">
+											<h3 class="mb-4 text-lg font-semibold text-white">
+												<span class="mr-2">🔮</span>
+												WQI Predictions (1-2 Days Ahead)
+											</h3>
+											<div class="grid gap-3 md:grid-cols-2">
+												{#each predictions as pred}
+													<div class="rounded-lg border border-slate-700 bg-slate-900/50 p-4">
+														<div class="mb-2 flex items-center justify-between">
+															<span class="text-xs font-semibold text-slate-400">
+																+{pred.hours_ahead}h
+															</span>
+															<span class="text-xs text-slate-500">
+																{Math.round(pred.confidence * 100)}% confidence
+															</span>
+														</div>
+														<div class="mb-2 flex items-center gap-3">
+															<div
+																class="h-4 w-4 rounded-full"
+																style="background-color: {getWaterQualityColor(pred.predicted_value)}"
+															></div>
+															<span class="text-2xl font-bold text-white">
+																{pred.predicted_value}
+															</span>
+														</div>
+														<p class="mb-2 text-xs text-slate-400">
+															{new Date(pred.timestamp).toLocaleString()}
+														</p>
+														<div class="flex items-center gap-2 text-xs text-slate-500">
+															<span>Range: {pred.lower_bound}-{pred.upper_bound}</span>
+														</div>
+														<p class="mt-1 text-xs font-medium" style="color: {getWaterQualityColor(pred.predicted_value)}">
+															{getWaterQualityCategory(pred.predicted_value)}
+														</p>
+													</div>
+												{/each}
+											</div>
+										</div>
+									{/if}
 
 									<div class="grid gap-3 md:grid-cols-2">
 										{#each historicalData as record}
@@ -456,7 +582,6 @@
 			{/if}
 		</div>
 	</div>
-</div>
 
 <style>
 	:global(.leaflet-container) {
